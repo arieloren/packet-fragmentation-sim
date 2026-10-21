@@ -1,22 +1,41 @@
 #pragma once
-#include <string>
+#include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
-// A structure representing the complete original message (before splitting or after reassembly)
+namespace config {
+inline constexpr std::size_t NUM_QUEUES = 5;
+inline constexpr std::size_t MAX_FRAGMENT_SIZE = 100;     // max payload characters per fragment
+inline constexpr int MIN_MESSAGE_SIZE = 1;
+inline constexpr int MAX_MESSAGE_SIZE = 1000;
+inline constexpr std::uint32_t MAX_MESSAGE_ID = 1'000'000;
+inline constexpr std::size_t QUEUE_CAPACITY = 50;         // fragments per queue
+inline constexpr double MESSAGE_PROBABILITY = 0.5;        // chance of a new message per tick
+inline constexpr int TOTAL_TICKS = 1000;
+}  // namespace config
+
+// A complete message (as reassembled by the receiver).
 struct Message {
-    uint32_t id;             // Unique running ID between 1 and 1,000,000
-    int target_queue;        // Target queue number, randomly generated between 1 and 5
-    int size;                // Total message size, randomly generated between 1 and 1000
-    std::string payload;     // The complete string containing the content (e.g., "1000100110021003")
+    std::uint32_t id{};
+    int target_queue{};      // 1..NUM_QUEUES
+    std::string payload;
 };
 
-// A structure representing a single fragment that passes through the queue system
+// A single fragment travelling through the queue system.
 struct Fragment {
-    // --- header information (Header) that enables Reassembly ---
-    uint32_t message_id;     // ID of the original message to which this fragment belongs
-    int fragment_index;      // Position of the fragment in the sequence (e.g., 0 for the first part, 1 for the second, etc.)
-    int total_fragments;     // Total number of fragments that make up the complete message
+    // --- header (metadata that enables reassembly) ---
+    std::uint32_t message_id{};          // grouping key: which message this belongs to
+    std::uint16_t fragment_index{};      // 0-based position: placement + out-of-order safety
+    std::uint16_t total_fragments{};     // completion detection + consistency validation
+    std::uint8_t source_queue{};         // 1..NUM_QUEUES, restored onto the reassembled message
 
-    // --- payload (Content) ---
-    std::string payload;     // The fragment itself, whose size will not exceed 100 characters
+    // --- body ---
+    std::string payload;                 // at most config::MAX_FRAGMENT_SIZE characters
+};
+
+// Output of the message source: the target queue and the already-fragmented message.
+struct GeneratedMessage {
+    int target_queue{};
+    std::vector<Fragment> fragments;
 };

@@ -1,89 +1,95 @@
 #pragma once
 #include "Types.h"
-#include <vector>
-#include <queue>
-#include <unordered_map>
-#include <random>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <queue>
+#include <random>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
 // ---------------------------------------------------------
 // 1. Message Source
 // ---------------------------------------------------------
+
+// Splits a message into fragments of at most config::MAX_FRAGMENT_SIZE characters.
+[[nodiscard]] std::vector<Fragment> fragment_message(std::uint32_t id, int target_queue,
+                                                     std::string_view payload);
+
 class MessageSource {
-private:
-    uint32_t next_message_id;                           // An ID ranging from 1 to 1,000,000
-    std::mt19937 rng;                                   // Modern random number generator (Mersenne Twister)
-    std::uniform_int_distribution<int> size_dist;       // Size generation between 1 and 1000
-    std::uniform_int_distribution<int> queue_dist;      // Queue selection between 1 and 5
-    std::uniform_real_distribution<double> chance_dist; // Probability generation (e.g., 50% chance to create a message each iteration)
-
-    // Helper function for generating the sequence of numbers (Payload) as required
-    std::string generate_payload(uint32_t id, int size);
-
 public:
-    MessageSource();
-    
-    // The function called on each iteration of the time loop.
-    // If a message is generated, it is split into fragments (up to 100 characters) which are returned in a vector,
-    // and the out_target_queue reference is updated.
-    // If no message is generated, an empty vector is returned.
-    std::vector<Fragment> tick(int& out_target_queue); 
+    // Pass a seed for reproducible runs; otherwise a random_device seed is used.
+    explicit MessageSource(std::optional<std::uint32_t> seed = std::nullopt);
+
+    // Called once per iteration. Returns a fragmented message with probability
+    // config::MESSAGE_PROBABILITY, otherwise std::nullopt.
+    [[nodiscard]] std::optional<GeneratedMessage> tick();
+
+private:
+    // Payload is the sequence id, id+1, id+2, ... concatenated, cut to `size` characters.
+    [[nodiscard]] static std::string generate_payload(std::uint32_t id, int size);
+
+    std::uint32_t next_message_id_{1};
+    std::mt19937 rng_;
+    std::bernoulli_distribution create_dist_{config::MESSAGE_PROBABILITY};
+    std::uniform_int_distribution<int> size_dist_{config::MIN_MESSAGE_SIZE, config::MAX_MESSAGE_SIZE};
+    std::uniform_int_distribution<int> queue_dist_{1, static_cast<int>(config::NUM_QUEUES)};
 };
 
 // ---------------------------------------------------------
 // 2. Queue System & Round Robin
 // ---------------------------------------------------------
 class QueueSystem {
-private:
-    static const int NUM_QUEUES = 5;
-    
-    // usage of an array of 5 queues (std::queue)
-    std::vector<std::queue<Fragment>> queues;
-    
-    // the pointer that remembers the current queue for Round Robin (values: 0 to 4)
-    int current_rr_index; 
-
 public:
-    QueueSystem();
+    explicit QueueSystem(std::size_t capacity = config::QUEUE_CAPACITY) : capacity_(capacity) {}
 
-    // enqueuing a collection of fragments for a new message into the target queue (1 to 5)
-    void enqueue_fragments(int queue_id, const std::vector<Fragment>& fragments);
+    // Enqueues all fragments into queue `queue_id` (1..NUM_QUEUES), or none of them:
+    // returns false (and counts a dropped message) if they don't fit or queue_id is invalid.
+    bool enqueue_message(int queue_id, std::vector<Fragment>&& fragments);
 
-    // dispatching a single fragment based on the Round Robin algorithm.
-    // using std::optional to allow returning "nothing" (std::nullopt) if the selected queue is empty.
-    std::optional<Fragment> dispatch_next();
+    // Dispatches one fragment, round-robin starting after the last served queue and
+    // skipping empty queues. Returns std::nullopt only if every queue is empty.
+    [[nodiscard]] std::optional<Fragment> dispatch_next();
+
+    [[nodiscard]] std::size_t dropped_messages() const { return dropped_messages_; }
+    [[nodiscard]] std::size_t fragments_in_flight() const;
+
+private:
+    std::array<std::queue<Fragment>, config::NUM_QUEUES> queues_;
+    std::size_t capacity_;
+    std::size_t rr_index_{0};          // next queue to examine
+    std::size_t dropped_messages_{0};
 };
 
 // ---------------------------------------------------------
-// 3. Internal helper structure for the receiver – managing the assembly of a single message
+// 3. Receiver (reassembly)
 // ---------------------------------------------------------
+
+// Per-message reassembly state: payloads only, indexed by fragment_index.
 struct ReassemblyBuffer {
-    int total_fragments_expected = 0;
-    int fragments_received = 0;
-    std::vector<Fragment> parts; // Stores the fragments received so far for a specific message
-
+    std::vector<std::optional<std::string>> parts;
+    std::size_t received{0};
+    std::size_t total_bytes{0};
+    int source_queue{0};
 };
 
-// ---------------------------------------------------------
-// 4. Message Receiving System (Receiver)
-// ---------------------------------------------------------
 class Receiver {
-private:
-    // Dictionary that groups all the fragments of messages that have not yet been fully received, mapped by the message_id
-    std::unordered_map<uint32_t, ReassemblyBuffer> assembly_map;
-    
-    // Final output queue to which messages are added only after they have been fully reassembled (Reassembly)
-    std::queue<Message> output_queue; 
-
-    // Internal function that checks if all parts have been received for a specific message ID. If so, it assembles them and moves to the output queue.
-    void attempt_reassembly(uint32_t message_id);
-
 public:
-    Receiver() = default;
+    // Accepts one fragment (in any order). Returns false and counts it as rejected if it is
+    // malformed (bad index/total, inconsistent total, or a duplicate).
+    bool receive_fragment(Fragment fragment);
 
-// The function that receives a single fragment from the Round Robin system
-    void receive_fragment(const Fragment& fragment);
+    // Pops the next fully reassembled message from the output queue.
+    [[nodiscard]] std::optional<Message> pop_output();
 
-    // At the end of the program (after the time loop), this function will print statistics about the messages that were received, their order, and their size.
-    void print_statistics() const;
+    [[nodiscard]] std::size_t pending_messages() const { return assembly_map_.size(); }
+    [[nodiscard]] std::size_t rejected_fragments() const { return rejected_fragments_; }
+
+private:
+    std::unordered_map<std::uint32_t, ReassemblyBuffer> assembly_map_;
+    std::queue<Message> output_queue_;
+    std::size_t rejected_fragments_{0};
 };

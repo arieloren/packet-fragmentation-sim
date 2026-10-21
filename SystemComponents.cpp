@@ -1,172 +1,147 @@
 #include "SystemComponents.h"
-#include <iostream>
-#include <cmath>
+
+#include <algorithm>
+#include <utility>
 
 // =========================================================
-// 1. Implementing the Message Source
+// 1. Message Source
 // =========================================================
 
-MessageSource::MessageSource() 
-    : next_message_id(1), 
-      rng(std::random_device{}()), // Initialize the random number generator with a true random seed
-      size_dist(1, 1000), 
-      queue_dist(1, 5), 
-      chance_dist(0.0, 1.0) 
-{}
+std::vector<Fragment> fragment_message(std::uint32_t id, int target_queue, std::string_view payload) {
+    constexpr std::size_t max_frag = config::MAX_FRAGMENT_SIZE;
+    const std::size_t total = (payload.size() + max_frag - 1) / max_frag;
 
-// Helper function for generating the sequence of numbers (Payload) as required
-// For example, if the ID is 1000, the sequence will be "100010011002..." until we reach the desired length.
-std::string MessageSource::generate_payload(uint32_t id, int size) {
-    std::string payload = "";
-    uint32_t current_num = id;
-    while (payload.length() < (size_t)size) {
-        payload += std::to_string(current_num);
-        current_num++;
+    std::vector<Fragment> fragments;
+    fragments.reserve(total);
+    for (std::size_t i = 0; i < total; ++i) {
+        const std::string_view slice = payload.substr(i * max_frag, max_frag);
+        fragments.push_back(Fragment{id,
+                                     static_cast<std::uint16_t>(i),
+                                     static_cast<std::uint16_t>(total),
+                                     static_cast<std::uint8_t>(target_queue),
+                                     std::string(slice)});
     }
-    // Exact cut to the desired size (since the last addition might have exceeded the size)
-    return payload.substr(0, size);
+    return fragments;
 }
 
-std::vector<Fragment> MessageSource::tick(int& out_target_queue) {
-    std::vector<Fragment> generated_fragments;
-    
-    // 50% chance of creating a message in each iteration (can be adjusted to control load)
-    if (chance_dist(rng) > 0.5) {
-        return generated_fragments; // Returns an empty vector, no message created
+MessageSource::MessageSource(std::optional<std::uint32_t> seed)
+    : rng_(seed ? *seed : std::random_device{}()) {}
+
+std::string MessageSource::generate_payload(std::uint32_t id, int size) {
+    const auto target = static_cast<std::size_t>(size);
+    std::string payload;
+    payload.reserve(target + 10);  // the last number may overshoot by up to 10 digits
+    for (std::uint32_t n = id; payload.size() < target; ++n) {
+        payload += std::to_string(n);
+    }
+    payload.resize(target);
+    return payload;
+}
+
+std::optional<GeneratedMessage> MessageSource::tick() {
+    if (!create_dist_(rng_)) {
+        return std::nullopt;
     }
 
-    // --- Creating a new message ---
-    uint32_t current_id = next_message_id++;
-    int msg_size = size_dist(rng);
-    out_target_queue = queue_dist(rng);
-    std::string full_payload = generate_payload(current_id, msg_size);
+    const std::uint32_t id = next_message_id_;
+    next_message_id_ = (next_message_id_ % config::MAX_MESSAGE_ID) + 1;  // wraps 1,000,000 -> 1
 
-    // --- Fragmentation ---
-    // Maximum size for each fragment is 100 characters.
-    const int MAX_FRAG_SIZE = 100;
-    
-    // Calculate the total number of fragments (with ceiling)
-
-    int total_fragments = std::ceil((double)msg_size / MAX_FRAG_SIZE);
-
-    for (int i = 0; i < total_fragments; ++i) {
-        Fragment frag;
-        frag.message_id = current_id;
-        frag.fragment_index = i;
-        frag.total_fragments = total_fragments;
-        
-        // Cut substring from the original message
-        int start_pos = i * MAX_FRAG_SIZE;
-        int current_frag_size = std::min(MAX_FRAG_SIZE, msg_size - start_pos);
-        frag.payload = full_payload.substr(start_pos, current_frag_size);
-        
-        generated_fragments.push_back(frag);
-    }
-
-    return generated_fragments;
+    const int size = size_dist_(rng_);
+    const int queue = queue_dist_(rng_);
+    return GeneratedMessage{queue, fragment_message(id, queue, generate_payload(id, size))};
 }
 
 // =========================================================
-// 2. Implementing the Queue System & Round Robin
+// 2. Queue System & Round Robin
 // =========================================================
 
-QueueSystem::QueueSystem() : current_rr_index(0) {
-    // Initialize an array of 5 empty queues
-    queues.resize(NUM_QUEUES);
-}
-
-void QueueSystem::enqueue_fragments(int queue_id, const std::vector<Fragment>& fragments) {
-    // The queue IDs generated are 1-5, but the index in the array in C++ is 0-4
-    int actual_index = queue_id - 1;
-    
-    // Enqueuing all fragments into the appropriate queue (FIFO)
-    for (const auto& frag : fragments) {
-        queues[actual_index].push(frag);
+bool QueueSystem::enqueue_message(int queue_id, std::vector<Fragment>&& fragments) {
+    if (queue_id < 1 || queue_id > static_cast<int>(config::NUM_QUEUES)) {
+        ++dropped_messages_;
+        return false;
     }
+
+    auto& queue = queues_[static_cast<std::size_t>(queue_id - 1)];
+    if (queue.size() + fragments.size() > capacity_) {
+        ++dropped_messages_;  // all-or-nothing: never leave a message half-admitted
+        return false;
+    }
+
+    for (auto& frag : fragments) {
+        queue.push(std::move(frag));
+    }
+    return true;
 }
 
 std::optional<Fragment> QueueSystem::dispatch_next() {
-    std::optional<Fragment> dispatched_frag = std::nullopt;
-
-    // Check the current queue in the Round Robin cycle
-    if (!queues[current_rr_index].empty()) {
-        // If there is something in it - dispatch a single fragment
-        dispatched_frag = queues[current_rr_index].front();
-        queues[current_rr_index].pop();
-    }
-
-    // Advance the pointer to the next queue in the round-robin cycle (0 to 4)
-    current_rr_index = (current_rr_index + 1) % NUM_QUEUES;
-
-    // Return the dispatched fragment (or nullopt if the queue was empty)
-    return dispatched_frag;
-}
-
-// =========================================================
-// 3. Implementing the Receiver System
-// =========================================================
-
-void Receiver::receive_fragment(const Fragment& fragment) {
-    // If this is the first fragment received for this message, the map automatically creates a buffer for it.
-    ReassemblyBuffer& buffer = assembly_map[fragment.message_id];
-    
-    // Defining the expected total number of parts (set once when the first fragment of the message arrives)
-    if (buffer.total_fragments_expected == 0) {
-        buffer.total_fragments_expected = fragment.total_fragments;
-        // Preparing the array with the appropriate size so we can place each fragment in the correct position according to its index
-        buffer.parts.resize(fragment.total_fragments);
-    }
-
-    // Storing the fragment in the correct position according to its original index
-    // (Prevents issues if message parts arrive out of order due to Round Robin)
-    buffer.parts[fragment.fragment_index] = fragment;
-    buffer.fragments_received++;
-
-    // Checking if we have collected all the parts
-    attempt_reassembly(fragment.message_id);
-}
-
-void Receiver::attempt_reassembly(uint32_t message_id) {
-    ReassemblyBuffer& buffer = assembly_map[message_id];
-    
-    // Checking if we have collected all the parts
-    if (buffer.fragments_received == buffer.total_fragments_expected) {
-        
-        // Reassembly of the complete Payload
-        std::string full_payload = "";
-        for (const auto& frag : buffer.parts) {
-            full_payload += frag.payload;
+    for (std::size_t attempt = 0; attempt < queues_.size(); ++attempt) {
+        const std::size_t idx = (rr_index_ + attempt) % queues_.size();
+        auto& queue = queues_[idx];
+        if (queue.empty()) {
+            continue;
         }
-
-        // Creating the reassembled source message (without target_queue since it has already reached its destination)
-        Message complete_msg;
-        complete_msg.id = message_id;
-        complete_msg.size = full_payload.length();
-        complete_msg.payload = full_payload;
-
-        // Insertion into the final output queue
-        output_queue.push(complete_msg);
-
-        // Clearing the memory of the map - we have finished processing this message
-        assembly_map.erase(message_id);
+        Fragment frag = std::move(queue.front());
+        queue.pop();
+        rr_index_ = (idx + 1) % queues_.size();
+        return frag;
     }
+    return std::nullopt;
 }
 
-void Receiver::print_statistics() const {
-    std::cout << "\n===== Simulation Completion Report ====="<< std::endl;
-    std::cout << "Total messages in output queue: " << output_queue.size() << std::endl;
-    
-    // In C++, you cannot iterate over an std::queue using a standard for-loop, so we will create a copy and empty it.
-    std::queue<Message> temp_queue = output_queue;
-    
-    int order = 1;
-    while (!temp_queue.empty()) {
-        const Message& msg = temp_queue.front();
-        std::cout << order << ". Message ID: "<< msg.id 
-                  << " | Size in output queue: " << msg.size 
-                  << " | Initial content: " << msg.payload.substr(0, 15) << "..." << std::endl;
-        temp_queue.pop();
-        order++;
+std::size_t QueueSystem::fragments_in_flight() const {
+    std::size_t total = 0;
+    for (const auto& queue : queues_) {
+        total += queue.size();
     }
-    std::cout << "=============================\n" << std::endl;
+    return total;
+}
+
+// =========================================================
+// 3. Receiver
+// =========================================================
+
+bool Receiver::receive_fragment(Fragment fragment) {
+    if (fragment.total_fragments == 0 || fragment.fragment_index >= fragment.total_fragments) {
+        ++rejected_fragments_;
+        return false;
+    }
+
+    auto it = assembly_map_.find(fragment.message_id);
+    if (it == assembly_map_.end()) {
+        ReassemblyBuffer buffer;
+        buffer.parts.resize(fragment.total_fragments);
+        buffer.source_queue = fragment.source_queue;
+        it = assembly_map_.emplace(fragment.message_id, std::move(buffer)).first;
+    }
+    ReassemblyBuffer& buffer = it->second;
+
+    if (buffer.parts.size() != fragment.total_fragments || buffer.parts[fragment.fragment_index]) {
+        ++rejected_fragments_;  // inconsistent total, or duplicate fragment
+        return false;
+    }
+
+    // Place by index, so arrival order doesn't matter.
+    buffer.total_bytes += fragment.payload.size();
+    buffer.parts[fragment.fragment_index] = std::move(fragment.payload);
+    ++buffer.received;
+
+    if (buffer.received == buffer.parts.size()) {
+        std::string payload;
+        payload.reserve(buffer.total_bytes);
+        for (auto& part : buffer.parts) {
+            payload += *part;
+        }
+        output_queue_.push(Message{it->first, buffer.source_queue, std::move(payload)});
+        assembly_map_.erase(it);
+    }
+    return true;
+}
+
+std::optional<Message> Receiver::pop_output() {
+    if (output_queue_.empty()) {
+        return std::nullopt;
+    }
+    Message msg = std::move(output_queue_.front());
+    output_queue_.pop();
+    return msg;
 }
