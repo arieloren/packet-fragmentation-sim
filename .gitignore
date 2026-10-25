@@ -19,6 +19,7 @@ Makefile
 
 # Task & documentation files to keep private
 *.pdf
+docs/
 
 # IDE and Editor files
 .vscode/

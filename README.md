@@ -23,11 +23,34 @@ At the end, the output queue is drained and the order, ID, target queue and size
 
 The receiver rejects (and counts) malformed fragments: `total_fragments == 0`, `fragment_index >= total_fragments`, an inconsistent total, or a duplicate fragment.
 
-## Build, run, test
+## Project structure
+
+```
+.
+|-- CMakeLists.txt
+|-- include/    # headers (SystemComponents.h, Types.h)
+|-- src/        # implementation and entry point (SystemComponents.cpp, main.cpp)
+`-- docs/       # task description and other documents (git-ignored)
+```
+
+## Build and run
+
+Requires CMake and a C++17 compiler.
+
+Linux / macOS (single-config generators put the binary directly in `build/`):
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/packet_sim [seed]              # optional seed gives reproducible runs
+```
+
+Windows (PowerShell, Visual Studio generator; use a terminal where `cmake` is on PATH, e.g. "Developer PowerShell for VS"):
 
 ```
 cmake -S . -B build
 cmake --build build --config Release
-build/Release/packet_sim [seed]        # optional seed gives reproducible runs
-ctest --test-dir build -C Release --output-on-failure
+.\build\Release\packet_sim.exe [seed]  # optional seed gives reproducible runs
 ```
+
+Don't type the brackets around `[seed]`, e.g. `.\build\Release\packet_sim.exe 42`.

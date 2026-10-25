@@ -89,7 +89,7 @@ public:
     [[nodiscard]] std::size_t rejected_fragments() const { return rejected_fragments_; }
 
 private:
-    std::unordered_map<std::uint32_t, ReassemblyBuffer> assembly_map_;
+    std::unordered_map<std::uint32_t, ReassemblyBuffer> assembly_map_; //dict in python
     std::queue<Message> output_queue_;
     std::size_t rejected_fragments_{0};
 };

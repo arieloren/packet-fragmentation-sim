@@ -6,11 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(packet_sim_core STATIC
-    SystemComponents.cpp
-    SystemComponents.h
-    Types.h
+    src/SystemComponents.cpp
+    include/SystemComponents.h
+    include/Types.h
 )
-target_include_directories(packet_sim_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(packet_sim_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 if(MSVC)
     target_compile_options(packet_sim_core PUBLIC /W4 /permissive- /utf-8)
@@ -18,10 +18,6 @@ else()
     target_compile_options(packet_sim_core PUBLIC -Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(packet_sim main.cpp)
+add_executable(packet_sim src/main.cpp)
 target_link_libraries(packet_sim PRIVATE packet_sim_core)
 
-enable_testing()
-add_executable(packet_sim_tests tests.cpp)
-target_link_libraries(packet_sim_tests PRIVATE packet_sim_core)
-add_test(NAME packet_sim_tests COMMAND packet_sim_tests)

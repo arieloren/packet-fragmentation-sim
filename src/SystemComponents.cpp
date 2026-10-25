@@ -12,7 +12,7 @@ std::vector<Fragment> fragment_message(std::uint32_t id, int target_queue, std::
     const std::size_t total = (payload.size() + max_frag - 1) / max_frag;
 
     std::vector<Fragment> fragments;
-    fragments.reserve(total);
+    fragments.reserve(total); // Pre-allocate capacity to prevent reallocations
     for (std::size_t i = 0; i < total; ++i) {
         const std::string_view slice = payload.substr(i * max_frag, max_frag);
         fragments.push_back(Fragment{id,
